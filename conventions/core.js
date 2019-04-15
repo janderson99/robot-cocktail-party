@@ -84,7 +84,7 @@ const _createClosureAroundNextStep = (prev, prevIndex, callback) => (...arg) => 
 	const nextStep = _createClosureAroundNextStep(scope, index, callback);
 
 	// execute step
-	if (error && type[index] === 'step') error.message = `couldn't ${_desc(scope, prevIndex)} : ${error.message}`;
+	if (error && type[prevIndex] === 'step') error.message = `couldn't ${_desc(scope, prevIndex)} : ${error.message}`;
 	if (typeof func[index] !== 'function') return void callback(error, ...arg, {scopeDepth, scopeId});
 
 	// execute step function
@@ -126,10 +126,10 @@ const [_writeLog, _writeError] = [
 ];
 
 process.stdout.write = (...a) =>
-	lastLoggedScopeId = _writeLog(...a);
+	lastLoggedScopeId = void _writeLog(...a);
 
 process.stderr.write = (...a) =>
-	lastLoggedScopeId = _writeError(...a);
+	lastLoggedScopeId = void _writeError(...a);
 
 /**
  *  Appends the value returned by the given function to the log output of every step
