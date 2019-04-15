@@ -37,9 +37,9 @@ module.exports.Ids = JsonSchemaModel({
  */
 
 module.exports.ensureIndex = Method
-	.stackIoMiddleware({filename: 'cron', interval: '* * * * * *', until: Date.now()})
-	.stackIoMiddleware({filename: 'mongo', dbOpName: 'index', uniqueBy: ['robotName']})
-	.stackIoMiddleware({filename: 'mongo', dbOpName: 'index', uniqueBy: ['robotId']});
+	.stackIoMiddleware({filename: 'cron', when: 'in 0 seconds'})
+	.stackIoMiddleware({filename: 'mongo', dbOpName: 'index', uniqueBy: ['robotId']})
+	.stackIoMiddleware({filename: 'mongo', dbOpName: 'index', uniqueBy: ['robotName']});
 
 module.exports.insert = Method
 	.stackIoMiddleware({filename: 'http', uri: 'http://localhost:8081/robots', method: 'POST'})
