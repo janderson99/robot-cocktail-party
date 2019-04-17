@@ -4,13 +4,12 @@ const path = require('path');
 const uuid = require('uuid');
 const DbOp = require('ioModels/DbOp');
 const {MongoClient} = require('mongodb');
+const {getStatefulCache} = require('conventions/statefulCache');
 const {JsonSchemaModel, Solution, Step, Catch, Reject} = require('conventions/core');
 
-const indexes = [];
 const dbOpHandlers = {};
 const hostModel = path.basename(process.argv[1], '.js');
-const specialCases = ['Event', 'EventResult', 'EventNotification'];
-const mongoClient = new MongoClient(process.env.MKPLDB, {useNewUrlParser: true});
+const ioModels = ['Event', 'EventResult', 'EventNotification'];
 
 /**
  *  Options governing this handler's behavior
@@ -42,20 +41,21 @@ module.exports = options => {
 	const {Model, dbOpName} = Options(options);
 	const isBrowser = typeof window === 'object';
 	const isHostServer = hostModel === Model.name;
-	if (isBrowser) return _noBrowserSupportForDbOps;
-	if (isHostServer) return dbOpHandlers[dbOpName].bind(null, options);
-	if (specialCases.includes(Model.name)) return dbOpHandlers[dbOpName].bind(null, options);
+	const isIoModel = ioModels.includes(Model.name);
+	if (!isBrowser && isIoModel) return dbOpHandlers[dbOpName].bind(null, options);
+	if (!isBrowser && isHostServer) return dbOpHandlers[dbOpName].bind(null, options);
+	if (isBrowser || !isIoModel && !isHostServer) return _indicateSupport.bind(null, options);
 };
 
 /**
- *  Indicates no browser support for Db ops
+ *  Indicates no support for Db op
  *  @param {Object} [scope]
  *  @param {Function} [next]
  *  @return {void}
  */
 
-const _noBrowserSupportForDbOps = Solution('indicate lack of browser support for Db operations', (scope, next) => {
-	next(Error('Cannot execute Db operations in browser'));
+const _indicateSupport = Solution('indicate support for ${Model.name}.${methodName}', ({Model, methodName}, next) => {
+	next(Error(`${Model.name}.${methodName} cannot be used by browsers, or non-host servers`));
 });
 
 /**
@@ -65,20 +65,16 @@ const _noBrowserSupportForDbOps = Solution('indicate lack of browser support for
  *  @return {void}
  */
 
-dbOpHandlers.index = Solution('validate DbOp "${dbOpName}" for ${Model.name}.${methodName}', (scope, next) => {
-	next(DbOp(scope));
+dbOpHandlers.index = Solution('connect to Db for \'${dbOpName}\' DbOp for ${Model.name}.${methodName}', (scope, next) => {
+	_connect({...DbOp(scope), ...Options(scope)}, next);
 });
 
-Step('connect DbOp Db for ${Model.name}.${methodName}', (scope, next) => {
-	_connectToDb(scope, next);
-});
-
-Step('execute DbOp "${dbOpName}" for ${Model.name}.${methodName}', ({collection, uniqueBy, ...scope}, next) => {
+Step('execute DbOp', ({collection, uniqueBy, ...scope}, next) => {
 	const indexObj = uniqueBy.reduce((a, k) => ({...a, [k]: 1}), {});
 	collection.createIndex(indexObj, {background: true, unique: true}, next);
 });
 
-Step('execute logicalHandler for ${Model.name}.${methodName}', ({logicalHandler, ...scope}, next) => {
+Step('execute logicalHandler', ({logicalHandler, ...scope}, next) => {
 	logicalHandler(scope, next);
 });
 
@@ -89,20 +85,16 @@ Step('execute logicalHandler for ${Model.name}.${methodName}', ({logicalHandler,
  *  @return {void}
  */
 
-dbOpHandlers.find = Solution('validate DbOp "${dbOpName}" for ${Model.name}.${methodName}', (scope, next) => {
-	next(DbOp(scope));
+dbOpHandlers.find = Solution('connect to Db for \'${dbOpName}\' DbOp for ${Model.name}.${methodName}', (scope, next) => {
+	_connect({...DbOp(scope), ...Options(scope)}, next);
 });
 
-Step('connect DbOp Db for ${Model.name}.${methodName}', (scope, next) => {
-	_connectToDb(scope, next);
-});
-
-Step('execute DbOp "${dbOpName}" for ${Model.name}.${methodName}', ({Model, collection, criteria, projection, sort, limit, skip}, next) => {
+Step('execute DbOp', ({Model, collection, criteria, projection, sort, limit, skip}, next) => {
 	collection.find(criteria, {projection, sort, limit, skip}).toArray(next);
 });
 
-Step('format DbOp "${dbOpName}" result for ${Model.name}.${methodName}', ({Model}, next, _, docs) => {
-	next({[Model.pluralCamelCaseName]: docs.map(Model), resultCount: docs.length});
+Step('format DbOp result', ({Model}, next, _, docs) => {
+	next({[Model.pluralCamelCaseName]: docs.map(Model)});
 });
 
 /**
@@ -112,35 +104,29 @@ Step('format DbOp "${dbOpName}" result for ${Model.name}.${methodName}', ({Model
  *  @return {void}
  */
 
-dbOpHandlers.insert = Solution('validate DbOp "${dbOpName}" for ${Model.name}.${methodName}', (scope, next) => {
-	next(DbOp(scope));
+dbOpHandlers.insert = Solution('connect to Db for \'${dbOpName}\' DbOp for ${Model.name}.${methodName}', (scope, next) => {
+	_connect({...DbOp(scope), ...Options(scope)}, next);
 });
 
-Step('connect DbOp Db for ${Model.name}.${methodName}', (scope, next) => {
-	_connectToDb(scope, next);
-});
-
-Step('ensure that ${Model.camelCaseName}Id is set', ({Model, ...scope}, next) => {
-	const prop = `${Model.camelCaseName}Id`;
-	scope[prop] ? next() : next({[prop]: uuid()});
-});
-
-Step('execute DbOp "${dbOpName}" for ${Model.name}.${methodName}', ({Model, projection, collection, ...scope}, next) => {
+Step('execute DbOp', ({Model, projection, collection, ...scope}, next) => {
 	const upsert = true;
-	const $set = Model(scope);
-	const ids = Model.Ids(scope);
 	const returnOriginal = false;
-	collection.findOneAndUpdate(ids, {$set}, {returnOriginal, upsert}, next);
+	const ids = Model.Ids(scope);
+	for (var hasId in ids) break;
+	const opt = {$set: Model(scope)};
+	if (!hasId) Object.assign(ids, opt.$set);
+	if (!hasId) opt.$setOnInsert = {[`${Model.camelCaseName}Id`]: uuid()};
+	collection.findOneAndUpdate(ids, opt, {returnOriginal, upsert, projection}, next);
 });
 
-Catch('catch error in DbOp "${dbOpName}" for ${Model.name}.${methodName}', ({error, ...scope}, next) => {
+Catch('catch error', ({error, ...scope}, next) => {
 	const {message, stack, codeName} = error;
 	if (codeName !== 'DuplicateKey') return next(error);
 	next(Object.assign(Object.create(Reject.prototype), {message, stack}, error));
 });
 
-Step('format DbOp "${dbOpName}" result for ${Model.name}.${methodName}', ({Model, value, ...scope}, next) => {
-	value ? next({[Model.pluralCamelCaseName]: [Model(value)], resultCount: 1}) : next();
+Step('format DbOp result', ({Model, value, ...scope}, next) => {
+	value ? next({[Model.pluralCamelCaseName]: [Model(value)]}) : next();
 });
 
 /**
@@ -149,22 +135,27 @@ Step('format DbOp "${dbOpName}" result for ${Model.name}.${methodName}', ({Model
  *  @param {Function} [next]
  */
 
-dbOpHandlers.update = Solution('validate DbOp "${dbOpName}" for ${Model.name}.${methodName}', (scope, next) => {
-	next(DbOp(scope));
+dbOpHandlers.update = Solution('connect to Db for \'${dbOpName}\' DbOp for ${Model.name}.${methodName}', (scope, next) => {
+	_connect({...DbOp(scope), ...Options(scope)}, next);
 });
 
-Step('connect DbOp Db for ${Model.name}.${methodName}', (scope, next) => {
-	_connectToDb(scope, next);
+Step('execute DbOp', ({Model, criteria, projection, increment, collection, upsert, ...scope}, next) => {
+	const opt = {};
+	const doc = Model(scope);
+	const returnOriginal = false;
+	if (Object.keys(doc).length) opt.$set = doc;
+	if (Object.keys(Object(increment)).length) opt.$inc = increment;
+	collection.findOneAndUpdate(criteria, opt, {returnOriginal, upsert, projection}, next);
 });
 
-Step('execute DbOp "${dbOpName}" for ${Model.name}.${methodName}', ({Model, collection, criteria, increment, ...scope}, next) => {
-	const $inc = increment;
-	const $set = Model(scope);
-	collection.updateMany(criteria, {$set, $inc}, next);
+Catch('catch error', ({error, ...scope}, next) => {
+	const {message, stack, codeName} = error;
+	if (codeName !== 'DuplicateKey') return next(error);
+	next(Object.assign(Object.create(Reject.prototype), {message, stack}, error));
 });
 
-Step('format DbOp "${dbOpName}" result for ${Model.name}.${methodName}', ({Model, value, ...scope}, next) => {
-	value ? next({[Model.pluralCamelCaseName]: [Model(value)], resultCount: 1}) : next();
+Step('format DbOp result', ({Model, value, ...scope}, next) => {
+	value ? next({[Model.pluralCamelCaseName]: [Model(value)]}) : next();
 });
 
 /**
@@ -173,20 +164,16 @@ Step('format DbOp "${dbOpName}" result for ${Model.name}.${methodName}', ({Model
  *  @param {Function} [next]
  */
 
-dbOpHandlers.remove = Solution('validate DbOp "${dbOpName}" for ${Model.name}.${methodName}', (scope, next) => {
-	next(DbOp(scope));
+dbOpHandlers.remove = Solution('connect to Db for \'${dbOpName}\' DbOp for ${Model.name}.${methodName}', (scope, next) => {
+	_connect({...DbOp(scope), ...Options(scope)}, next);
 });
 
-Step('connect DbOp Db for ${Model.name}.${methodName}', (scope, next) => {
-	_connectToDb(scope, next);
-});
-
-Step('execute DbOp "${dbOpName}" for ${Model.name}.${methodName}', ({collection, criteria}, next) => {
+Step('execute DbOp', ({collection, criteria}, next) => {
 	collection.findOneAndDelete(criteria, next);
 });
 
-Step('format DbOp "${dbOpName}" result for ${Model.name}.${methodName}', ({Model, value, ...scope}, next) => {
-	value ? next({[Model.pluralCamelCaseName]: [Model(value)], resultCount: 1}) : next();
+Step('format DbOp result', ({Model, value, ...scope}, next) => {
+	value ? next({[Model.pluralCamelCaseName]: [Model(value)]}) : next();
 });
 
 /**
@@ -195,28 +182,43 @@ Step('format DbOp "${dbOpName}" result for ${Model.name}.${methodName}', ({Model
  *  @param {Function} [next]
  */
 
-dbOpHandlers.count = Solution('validate DbOp "${dbOpName}" for ${Model.name}.${methodName}', (scope, next) => {
-	next(DbOp(scope));
+dbOpHandlers.count = Solution('connect to Db for \'${dbOpName}\' DbOp for ${Model.name}.${methodName}', (scope, next) => {
+	_connect({...DbOp(scope), ...Options(scope)}, next);
 });
 
-Step('connect DbOp Db for ${Model.name}.${methodName}', (scope, next) => {
-	_connectToDb(scope, next);
-});
-
-Step('execute DbOp "${dbOpName}" for ${Model.name}.${methodName}', ({collection, criteria, limit, skip}, next) => {
-	collection.count(criteria, {limit, skip}, (err, resultCount) => next(err, {resultCount}));
+Step('execute DbOp', ({Model, collection, criteria, limit, skip}, next) => {
+	collection.countDocuments(criteria, {limit, skip}, (err, count) => next(err, {[Model.pluralCamelCaseName]: count}));
 });
 
 /**
- *  Connects to database
- *  @param {Object} [scope]
+ *  Handles connection establishment
+ *  @param {Object} opt
  *  @param {Function} [next]
+ *  @param {Error} [error]
+ *  @return {*|void}
  */
 
-const _connectToDb = Solution('test DbOp Db connection', (scope, next) => {
-	mongoClient.isConnected() ? next() : mongoClient.connect(next);
-});
+const _connect = (opt, next, error) => {
+	const {Model, collectionName = Model.pluralCamelCaseName} = opt;
+	const _retry = _connect.bind(null, opt, next);
 
-Step('get DbOp "${Model.pluralCamelCaseName}" collection', ({Model, collectionName}, next) => {
-	next({collection: mongoClient.db().collection(Model.pluralCamelCaseName)});
-});
+	// delay if we've had an error
+	if (error) return setTimeout(_retry, 2000);
+
+	// retrieve established connection, or await establishment
+	const [_awaitClient, _setClient, client, _delClient] = getStatefulCache('conn=mongo', global);
+	if (_setClient) MongoClient.connect(process.env.MKPLDB, {useNewUrlParser: true}, _setClient);
+	if (_awaitClient) return _awaitClient(_retry);
+
+	// add error handlers if not already added
+	if (!client.hasListeners) client.db().on('close', _retry).on('error', _delClient);
+	client.hasListeners = true;
+
+	// retrieve collection, or await collection
+	const [_awaitCollection, _setCollection, collection] = getStatefulCache(`collection=${collectionName}`, client);
+	if (_setCollection) _setCollection(null, client.db().collection(collectionName));
+	if (_awaitCollection) return _awaitCollection(_retry);
+
+	// indicate success
+	next({collection});
+};

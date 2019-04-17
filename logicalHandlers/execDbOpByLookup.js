@@ -37,7 +37,7 @@ module.exports = Solution('parse options',  (scope, next) => {
 	next({...Options(scope), ...DbOp(scope)});
 });
 
-Step('execute ${dbOpName} on ${Model.name} documents',  ({Model, dbOpName, prop, foreignProp, ...scope}, next) => {
+Step('execute ${dbOpName} on ${Model.pluralName}',  ({Model, dbOpName, prop, foreignProp, ...scope}, next) => {
 	const foreignVal = scope[foreignProp];
 	const query = {[prop]: {$in: [foreignVal]}};
 	Model[dbOpName]({...scope, criteria: query}, next);

@@ -26,11 +26,12 @@ const Options = JsonSchemaModel({
  *  @return {void}
  */
 
-module.exports = Solution('count ${Model.name} docs with given IDs', ({Model, scope}, next) => {
-	const query = Model.Ids(scope);
-	Model.count({...scope, query}, next);
+module.exports = Solution('count ${Model.name} docs with given IDs', ({Model, ...scope}, next) => {
+	const criteria = Model.Ids(scope);
+	Model.count({...scope, criteria}, next);
 });
 
-Step('confirm given IDs match exactly 1 ${Model.name} doc', ({Model, resultCount, ...scope}, next) => {
-	resultCount === 1 ? next() : next(Reject(`Given Ids matched ${resultCount} ${Model.name} documents`));
+Step('confirm given IDs match exactly 1 ${Model.name}', ({Model, ...scope}, next) => {
+	const count = scope[Model.pluralCamelCaseName];
+	count === 1 ? next() : next(Reject(`Given Ids matched ${count} ${Model.pluralName}`));
 });

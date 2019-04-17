@@ -23,14 +23,12 @@ module.exports.flattenHttpRequest = ({Model, req}, next) => {
 	const criteria = req.params;
 	const extra = Extra(req.headers);
 	const qString = req.originalUrl.split(/\?/)[1];
+	const {eventName} = Event(get(req, 'body.events[0]'));
 	const context = get(req, 'body.events[0].data.eventContext');
-	const {eventId, eventName} = Event(get(req, 'body.events[0]'));
 	const oString = get(req, 'body.events[0].data.transform.queryParameter');
-	const eventStatus = get(req, 'body.events[0].eventStatusCode.codeValue');
 	const query = _parseDbOp([qString, oString].filter(s => s).join('&'), {criteria});
 	const model = Model(get(req, `body.events[0].data.transform.${Model.camelCaseName}`));
-	const docs = [].concat(get(req, `body.events[0].data.output.${Model.pluralCamelCaseName}`) || []).map(Model);
-	next(_noEmptyProps({...model, ...query, ...context, extra, eventStatus, eventId, eventName, [Model.pluralCamelCaseName]: docs}));
+	next(_noEmptyProps({...model, ...query, ...criteria, ...context, extra, eventName}));
 };
 
 /**
@@ -41,13 +39,13 @@ module.exports.flattenHttpRequest = ({Model, req}, next) => {
  */
 
 module.exports.flattenEventObj = ({Model, extra, eventId, eventName, statusCode, ...event}, next) => {
+	const docs = get(event, 'data.output');
 	const error = get(event, 'confirmMessage');
 	const criteria = get(event, 'data.eventContext');
 	const eventStatus = get(event, 'eventStatusCode.codeValue');
 	const model = Model(get(event, `data.transform.${Model.camelCaseName}`));
 	const query = _parseDbOp(get(event, 'data.transform.queryParameter'), {criteria});
-	const docs = [].concat(get(event, `data.output.${Model.pluralCamelCaseName}`) || []).map(Model);
-	next(_noEmptyProps({...model, ...query, ...criteria, ...error, extra, eventStatus, statusCode, eventId, eventName, [Model.pluralCamelCaseName]: docs}));
+	next(_noEmptyProps({...docs, ...model, ...query, ...criteria, ...error, extra, eventStatus, statusCode, eventId, eventName}));
 
 };
 
@@ -95,7 +93,6 @@ module.exports.unflattenEventNotification = (scope, next) => {
  */
 
 function _buildEvent({Model, ...scope}, event = {}) {
-	set(event, `data.output.${Model.pluralCamelCaseName}`, scope[Model.pluralCamelCaseName]);
 	set(event, 'eventStatusCode.codeValue', scope.eventStatus || 'completed');
 	set(event, 'confirmMessage.developerMessage', scope.developerMessage);
 	set(event, 'data.transform.queryParameter', _stringifyDbOp(scope));
@@ -106,6 +103,7 @@ function _buildEvent({Model, ...scope}, event = {}) {
 	set(event, 'data.eventContext', Model.Ids(scope));
 	set(event, 'eventId', scope.eventId || uuid());
 	set(event, 'extra', Extra(scope.extra));
+	set(event, 'data.output', scope);
 	return event;
 }
 

@@ -8,6 +8,7 @@ const Scope = require('ioModels/Scope');
 const amq = require('amqplib/callback_api');
 const EventResult = require('ioModels/EventResult');
 const EventNotification = require('ioModels/EventNotification');
+const {getStatefulCache} = require('conventions/statefulCache');
 const {JsonSchemaModel, Solution, Step, Catch, Reject} = require('conventions/core');
 
 const eventHandlers = {};
@@ -52,7 +53,7 @@ module.exports = options => {
 	const isHostServer = hostModel === Model.name;
 	if (isHostServer && options.eventName) _awaitInboundEvent(options);
 	if (isHostServer && options.notifName) _awaitInboundNotif(options);
-	if (!isBrowser && options.eventName) return _awaitOutboundEvent(options);
+	if (!isBrowser && !isHostServer) return _sendOutboundEvent.bind(null, options);
 };
 
 /**
@@ -62,12 +63,12 @@ module.exports = options => {
  *  @return {void}
  */
 
-const _awaitInboundNotif = Solution('await inbound MQ EventNotification for ${notifName}', ({notifName, ...scope}, next) => {
-	notifHandlers[notifName] = next;
+const _awaitInboundNotif = Solution('await inbound MQ EventNotification for ${notifName}', ({notifName, ...scope}) => {
+	notifHandlers[notifName] = _onInboundNotif.bind(null, scope);
 	_connect({notifName, ...scope});
 });
 
-Step('find EventNotification for ${notifName}', ({eventId, ...scope}, next) => {
+const _onInboundNotif = Solution('find EventNotification for ${notifName}', ({eventId, ...scope}, next) => {
 	Event.find({...scope, criteria: {eventId}}, next);
 });
 
@@ -98,12 +99,12 @@ Step('ack EventNotification for ${notifName}', (scope, next) => {
  *  @return {void}
  */
 
-const _awaitInboundEvent = Solution('await inbound MQ Events for ${eventName}', ({eventName, ...scope}, next) => {
-	eventHandlers[eventName] = next;
+const _awaitInboundEvent = Solution('await inbound MQ Events for ${eventName}', ({eventName, ...scope}) => {
+	eventHandlers[eventName] = _onInboundEvent.bind(null, scope);
 	_connect({...scope, eventName});
 });
 
-Step('find Event for ${eventName}', ({eventId, ...scope}, next) => {
+const _onInboundEvent = Solution('find Event for ${eventName}', ({eventId, ...scope}, next) => {
 	Event.find({eventId, ...scope, criteria: {eventId}}, next);
 });
 
@@ -168,11 +169,7 @@ Step('ack Event for ${eventName}', (scope, next) => {
  *  @return {void}
  */
 
-const _awaitOutboundEvent = Solution('await outbound MQ Event "${eventName}"', (scope, next) => {
-	return next;
-});
-
-Step('format Event for ${eventName}', (scope, next) => {
+const _sendOutboundEvent = Solution('format Event for ${eventName}', (scope, next) => {
 	Scope.unflattenEvent(scope, next);
 });
 
@@ -188,7 +185,7 @@ Step('establish channel for ${eventName}', ({eventId, ...scope}, next) => {
 Step('send Event for ${eventName}', ({Model, eventId, eventName, ...scope}, next) => {
 	resultHandlers[eventId] = next;
 	const json = JSON.stringify(MqMsg({eventName, eventId, ...scope}));
-	const replyTo = `${Model.camelCaseName}ManagerEventResults.${appInstanceId}`;
+	const replyTo = `${hostModel}ManagerEventResults.${appInstanceId}`;
 	dynamicMethods.sendEvent(eventName, new Buffer(json), {replyTo}, error => error && next(error));
 });
 
@@ -207,13 +204,37 @@ Step('ack EventResult for ${eventName}', (scope, next, parsedEventObj) => {
 });
 
 /**
+ *  Handles inbound Events/EventResults/EventNotifications
+ *  @param {Object} [scope]
+ *  @param {Function} [next]
+ *  @return {void}
+ */
+
+const _onInbound = Solution('parse MqMsg', ({fields, properties, content, headers}, next) => {
+	const parsed = MqMsg(JSON.parse(content.toString()));
+	next({mqMsg: {fields}, ...properties, ...parsed});
+});
+
+Step('execute MqMsg handler', ({handlers, key, ...scope}, next, parsed) => {
+	const mqMsgHandler = handlers[scope[key]];
+	if (!mqMsgHandler) throw Error('bad msg');
+	delete handlers[scope.eventId];
+	mqMsgHandler(parsed);
+});
+
+Catch('catch error', ({error, ack, ...scope}) => {
+	console.log(error.stack);
+	ack(scope);
+});
+
+/**
  *  Handles connection establishment
  *  @param {Object} opts
  *  @param {Error} [error]
  *  @return {*|void}
  */
 
-const _connect = (opts, error) => _connectionOpts(opts).every((opt, index, options) => {
+const _connect = (opts, error) => _getConnectionOpts(opts).every((opt, index, options) => {
 	const {onInbound, routingKey, exchangeName, queueName, methodSuffix} = opt;
 	const isLastOption = index + 1 === options.length;
 	const _retry = _connect.bind(null, opts);
@@ -222,7 +243,7 @@ const _connect = (opts, error) => _connectionOpts(opts).every((opt, index, optio
 	if (error) return void setTimeout(_retry, 2000);
 
 	// retrieve established connection, or await establishment
-	const [_awaitConnection, _setConnection, connection, _delConnection] = _getState('conn=mq', global);
+	const [_awaitConnection, _setConnection, connection, _delConnection] = getStatefulCache('conn=mq', global);
 	if (_setConnection) amq.connect(_getUrlFromPool(), _setConnection);
 	if (_awaitConnection) return void _awaitConnection(_retry);
 
@@ -231,7 +252,7 @@ const _connect = (opts, error) => _connectionOpts(opts).every((opt, index, optio
 	connection.hasListeners = true;
 
 	// retrieve established event channel, or await establishment
-	const [_awaitChannel, _setChannel, channel, _delChannel] = _getState(`ch=${exchangeName}`, connection);
+	const [_awaitChannel, _setChannel, channel, _delChannel] = getStatefulCache(`ch=${exchangeName}`, connection);
 	if (_setChannel) connection.createConfirmChannel(_setChannel);
 	if (_awaitChannel) return void _awaitChannel(_retry);
 
@@ -246,12 +267,12 @@ const _connect = (opts, error) => _connectionOpts(opts).every((opt, index, optio
 	dynamicMethods[`send${methodSuffix}`] = (...a) => channel.publish(exchangeName, ...a);
 
 	// confirm that inbound exchange is established, or await establishment
-	const [_awaitExchange, _setExchange] = _getState(`ex=${exchangeName}`, channel);
+	const [_awaitExchange, _setExchange] = getStatefulCache(`ex=${exchangeName}`, channel);
 	if (_setExchange) channel.assertExchange(exchangeName, 'topic', {}, _setExchange);
 	if (_awaitExchange) return void _awaitExchange(_retry);
 
 	// confirm that event queue is established, or await establishment
-	const [_awaitQueue, _setQueue] = _getState(`q=${queueName}`, channel);
+	const [_awaitQueue, _setQueue] = getStatefulCache(`q=${queueName}`, channel);
 	if (_setQueue) channel.assertQueue(queueName, {}, _setQueue);
 	if (_awaitQueue) return void _awaitQueue(_retry);
 
@@ -259,12 +280,12 @@ const _connect = (opts, error) => _connectionOpts(opts).every((opt, index, optio
 	if (!routingKey) return true;
 
 	// confirm that event topic is routed, or await routing
-	const [_awaitRoute, _setRoute] = _getState(`routingKey=${routingKey}`, channel);
+	const [_awaitRoute, _setRoute] = getStatefulCache(`routingKey=${routingKey}`, channel);
 	if (_setRoute) channel.bindQueue(queueName, exchangeName, routingKey, {}, _setRoute);
 	if (_awaitRoute) return void _awaitRoute(_retry);
 
 	// confirm that listener is established, or await establishment
-	const [_awaitEventListener, _setEventListener] = _getState(`listener=${exchangeName}`, channel);
+	const [_awaitEventListener, _setEventListener] = getStatefulCache(`listener=${exchangeName}`, channel);
 	if (_setEventListener) channel.consume(queueName, onInbound.bind(null, {ack}), {}, _setEventListener);
 	if (_awaitEventListener) return void _awaitEventListener(_retry);
 
@@ -273,11 +294,11 @@ const _connect = (opts, error) => _connectionOpts(opts).every((opt, index, optio
 	connectionHandlers.splice(0).forEach(f => f());
 });
 
-const _connectionOpts = ({Model, eventName, notifName, ...scope}) => [{
+const _getConnectionOpts = ({Model, eventName, notifName, ...scope}) => [{
 	methodSuffix: 'Result',
 	exchangeName: 'event_results',
-	queueName: `${Model.camelCaseName}ManagerEventResults.${appInstanceId}`,
-	routingKey: `${Model.camelCaseName}ManagerEventResults.${appInstanceId}`,
+	queueName: `${hostModel}ManagerEventResults.${appInstanceId}`,
+	routingKey: `${hostModel}ManagerEventResults.${appInstanceId}`,
 	onInbound: _onInbound.bind(null, {...scope, handlers: resultHandlers, key: 'eventId'}),
 }, {
 	routingKey: notifName,
@@ -297,42 +318,3 @@ const _getUrlFromPool = () => {
 	urls.push(urls.shift());
 	return urls[0] || process.env.AMQP;
 };
-
-const _delState = (obj, key) => error => {
-	obj[key] = null;
-	if (error) console.log(error.stack);
-};
-
-const _setState = (obj, key, oldState) => (error, newState) => {
-	obj[key] = newState;
-	if (error) console.log(error.stack);
-	oldState.map(f => process.nextTick(() => f(error)));
-};
-
-const _getState = (key, cache) => {
-	const state = cache[key] = cache[key] == null ? [] : cache[key];
-	const _set = state.length === 0 && _setState(cache, key, state);
-	const _delete = !Array.isArray(state) && _delState(cache, key);
-	const _await = Array.isArray(state) && (cb => state.push(cb));
-	const value = !Array.isArray(state) && state;
-	return [_await, _set, value, _delete];
-};
-
-const _onInbound = Solution('parse MqMsg', ({fields, properties, content, headers}, next) => {
-	const parsed = MqMsg(JSON.parse(content.toString()));
-	next({mqMsg: {fields}, ...properties, ...parsed});
-});
-
-Step('execute MqMsg handler', ({handlers, key, ...scope}, next, parsed) => {
-	const mqMsgHandler = handlers[scope[key]];
-	if (!mqMsgHandler) throw Error('bad msg');
-	delete handlers[scope.eventId];
-	mqMsgHandler(parsed);
-});
-
-Catch('catch error', ({error, ack, ...scope}) => {
-	console.log(error.stack);
-	ack(scope);
-});
-
-

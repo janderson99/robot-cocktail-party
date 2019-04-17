@@ -34,11 +34,11 @@ module.exports = JsonSchemaModel({
 
 module.exports.Result = JsonSchemaModel({
 	$id: 'DbOpResult',
-	properties: {
-		resultCount: {type: 'number', default: 0},
-	},
 	additionalProperties: {
-		type: 'array', items: {type: 'object'},
+		oneOf: [
+			{type: 'number'},
+			{type: 'array', items: {type: 'object'}}
+		],
 	}
 });
 

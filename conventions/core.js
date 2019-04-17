@@ -43,11 +43,13 @@ module.exports.onUniqueIndexer = validate =>
 module.exports.Reject =
 	Object.assign(Reject, {prototype: Object.create(Error.prototype)});
 
+const patternToToRemoveFromStack =
+	new RegExp(`(\\n.+${__dirname.replace(/(\W)/g, '\\$1')}.+)+`, 'g');
+
 function Reject(message) {
-	const safeDirname = __dirname.replace(/(\W)/g, '\\$1');
-	const pattern = new RegExp(`(\\n.+${safeDirname}.+)+`, 'g');
-	const error = Error.call(Object.create(Reject.prototype), message);
-	return Object.assign(error, {stack: error.stack.replace(pattern, '')});
+	var {stack, message} = new Error(...arguments);
+	stack = stack.replace(patternToToRemoveFromStack, '');
+	return Object.assign(Object.create(Reject.prototype), {message, stack});
 }
 
 /**
@@ -63,33 +65,35 @@ module.exports.Solution = (desc, func) => {
 	solution.func = [func];
 	solution.type = ['step'];
 	const onDone = error => error && console.log(error.stack);
-	return _createClosureAroundNextStep(solution, -1, onDone);
+	return _wrapClosureAroundNextStep(solution, -1, onDone);
 };
 
-const _createClosureAroundNextStep = (prev, prevIndex, callback) => (...arg) => {
-	let {type, func, desc, methodOpts = arg.find(a => a.Model), scopeDepth = -1, scopeId = ++lastScopeId} = prev;
+const _wrapClosureAroundNextStep = (prev, prevIndex, _onDone) => (...arg) => {
+	let {type, func, desc, methodOpts, scopeDepth = -1, scopeId = ++lastScopeId} = prev;
 	const error = arg.find((a, i) => a instanceof Error && arg.splice(i, 1));
 	const given = Object.assign({scopeDepth}, ...arg);
 
 	// transfer scope
 	const isFirstStep = prevIndex === -1;
 	if (isFirstStep) scopeDepth = given.scopeDepth + 1;
+	if (isFirstStep) methodOpts = arg.find(a => a.Model);
 	const scopeParentId = isFirstStep ? given.scopeId : scopeId;
-	if (isFirstStep && style(scopeId) === style(lastLoggedScopeId)) scopeId++;
+	if (isFirstStep && style(scopeId) === style(given.scopeId)) scopeId = ++lastScopeId;
+	if (isFirstStep && style(scopeId) === style(lastLoggedScopeId)) scopeId = ++lastScopeId;
 	const scope = {...prev, ...given, ...methodOpts, methodOpts, type, func, desc, error, scopeDepth, scopeId, scopeParentId};
 
 	// determine next step
-	callback = arg.find(o => typeof o === 'function') || callback;
+	if (isFirstStep) _onDone = arg.find(o => typeof o === 'function') || _onDone;
 	const index = type.indexOf(error ? 'catch' : 'step', prevIndex + 1);
-	const nextStep = _createClosureAroundNextStep(scope, index, callback);
+	const nextStep = _wrapClosureAroundNextStep(scope, index, _onDone);
 
-	// execute step
+	// handle errors
 	if (error && type[prevIndex] === 'step') error.message = `couldn't ${_desc(scope, prevIndex)} : ${error.message}`;
-	if (typeof func[index] !== 'function') return void callback(error, ...arg, {scopeDepth, scopeId});
+	if (typeof func[index] !== 'function') return void _onDone(error, ...arg, {scopeDepth, scopeId});
 
 	// execute step function
 	if (!isProd) _log(type[index], given, scope, _desc(scope, index));
-	try { func[index](scope, nextStep, ...arg); } catch (e) { nextStep(error || e, ...arg); }
+	try { return func[index](scope, nextStep, ...arg); } catch (e) { return nextStep(error || e, ...arg); }
 };
 
 const _desc = ({desc, ...scope}, n) =>
@@ -106,11 +110,10 @@ const _log = (type, given, scope, description) => {
 	lastLoggedScopeId = scope.scopeId;
 
 	// write log
-	const givenId = String(given.scopeId || scope.scopeId);
 	if (type === 'catch') description = chalk.redBright(description);
-	const id = String(isUninterruptedSequence ? scope.scopeId : givenId);
 	try { description += ` (${_logWatcher(scope)})`; } catch (ignored) { /* do nothing */ }
-	_writeLog(`${style(id)(id.padStart(logLeftSideSize))} ${style(givenId)(arrow)} ${description}\n`);
+	const id = String(isUninterruptedSequence && scope.scopeId || given.scopeId || scope.scopeId);
+	_writeLog(`${style(id)(id.padStart(logLeftSideSize))} ${style(scope.scopeId)(arrow)} ${description}\n`);
 };
 
 const colors = [
@@ -178,6 +181,7 @@ module.exports.JsonSchemaModel = ({$id, ...schema}) => {
 	const Model = _makeObjValidatorModel(_validation);
 	Object.defineProperty(Model, 'bind', {value: () => Model});
 	Object.defineProperty(Model, 'name', {value: classify($id || 'Model')});
+	Object.defineProperty(Model, 'pluralName', {value: pluralize(Model.name)});
 	Object.defineProperty(Model, 'underscoreName', {value: underscore(Model.name)});
 	Object.defineProperty(Model, 'camelCaseName', {value: camelize(Model.underscoreName, true)});
 	Object.defineProperty(Model, 'pluralCamelCaseName', {value: pluralize(Model.camelCaseName)});
@@ -210,7 +214,7 @@ const _makeMiddleware = ({filename, ...opt}) => (scope, logicalHandler) => {
 
 const _makeHandler = ({filename, ...opt}) => scope => (...args) => {
 	const handler = require(`logicalHandlers/${filename}.js`);
-	if (handler instanceof Function) return handler(...args, {...scope, ...opt});
+	if (handler instanceof Function) return handler({...scope, ...opt}, ...args);
 	throw Error(`Logical handler should export a function: logicalHandlers/${filename}.js`);
 };
 

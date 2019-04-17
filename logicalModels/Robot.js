@@ -36,8 +36,15 @@ module.exports.Ids = JsonSchemaModel({
  *  Method definitions
  */
 
+module.exports.verifyIds = Method
+	.setLogicalHandler({filename: 'verifyIds'});
+
+module.exports.count = Method
+	.stackIoMiddleware({filename: 'mq', eventName: 'robot.count'})
+	.stackIoMiddleware({filename: 'mongo', dbOpName: 'count'});
+
 module.exports.ensureIndex = Method
-	.stackIoMiddleware({filename: 'cron', when: 'in 0 seconds'})
+	.stackIoMiddleware({filename: 'cron', once: 'in 0 seconds'})
 	.stackIoMiddleware({filename: 'mongo', dbOpName: 'index', uniqueBy: ['robotId']})
 	.stackIoMiddleware({filename: 'mongo', dbOpName: 'index', uniqueBy: ['robotName']});
 
@@ -57,9 +64,9 @@ module.exports.remove = Method
 	.stackIoMiddleware({filename: 'mongo', dbOpName: 'remove'});
 
 module.exports.greetRobot = Method
-	.stackIoMiddleware({filename: 'http', uri: 'http://localhost:8081/robots/:greeterId/greet-robot/:greeteeId', method: 'POST'})
-	.setLogicalHandler({filename: 'greet', Greetee: module.exports, salutation: 'Hello'});
+	.stackIoMiddleware({filename: 'http', uri: 'http://localhost:8081/robots/:producerId/greet-robot/:receiverId', method: 'POST'})
+	.setLogicalHandler({filename: 'give', producedType: 'Greeting', receiverType: 'Robot'});
 
 module.exports.greetHuman = Method
-	.stackIoMiddleware({filename: 'http', uri: 'http://localhost:8081/robots/:greeterId/greet-human/:greeteeId', method: 'POST'})
-	.setLogicalHandler({filename: 'greet', Greetee: Human, salutation: 'Hey'});
+	.stackIoMiddleware({filename: 'http', uri: 'http://localhost:8081/robots/:producerId/greet-human/:receiverId', method: 'POST'})
+	.setLogicalHandler({filename: 'give', producedType: 'Greeting', receiverType: 'Human'});

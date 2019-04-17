@@ -3,7 +3,7 @@
 const {JsonSchemaModel, Method} = require('conventions/core');
 
 /**
- *  A record of interaction between a 'greeter' and a 'greetee'
+ *  A greeting
  *  @param {Object} srcObj
  *  @param {Function} [next]
  *  @return {Object} validObj
@@ -12,12 +12,11 @@ const {JsonSchemaModel, Method} = require('conventions/core');
 module.exports = JsonSchemaModel({
 	$id: 'Greeting',
 	properties: {
-		salutation: {type: 'string'},
-		greeteeId: {type: 'string', format: 'uuid'},
-		greeterId: {type: 'string', format: 'uuid'},
 		greetingId: {type: 'string', format: 'uuid'},
-		greeterType: {type: 'string', enum: ['Human', 'Robot']},
-		greeteeType: {type: 'string', enum: ['Human', 'Robot']},
+		producerId: {type: 'string', format: 'uuid'},
+		receiverId: {type: 'string', format: 'uuid'},
+		producerType: {type: 'string', enum: ['Human', 'Robot']},
+		receiverType: {type: 'string', enum: ['Human', 'Robot']},
 	},
 });
 
@@ -30,9 +29,18 @@ module.exports = JsonSchemaModel({
 
 module.exports.Ids = JsonSchemaModel({
 	$id: 'GreetingIds',
-	properties: {
-		greetingId: {type: 'string'},
-	},
+	anyOf: [{
+		properties: {
+			greetingId: {type: 'string'},
+		},
+	}, {
+		properties: {
+			producerId: {type: 'string'},
+			receiverId: {type: 'string'},
+			producerType: {type: 'string'},
+			receiverType: {type: 'string'},
+		},
+	}],
 });
 
 /**
@@ -40,20 +48,28 @@ module.exports.Ids = JsonSchemaModel({
  */
 
 module.exports.insert = Method
+	.stackIoMiddleware({filename: 'mq', eventName: 'greeting.add'})
 	.stackIoMiddleware({filename: 'mongo', dbOpName: 'insert'});
 
+module.exports.ensureIndex = Method
+	.stackIoMiddleware({filename: 'cron', once: 'in 0 seconds'})
+	.stackIoMiddleware({filename: 'mongo', dbOpName: 'index', uniqueBy: ['greetingId']})
+	.stackIoMiddleware({filename: 'mongo', dbOpName: 'index', uniqueBy: ['producerId', 'receiverId']});
+
 module.exports.find = Method
-	.stackIoMiddleware({filename: 'mongo', dbOpName: 'find'})
-	.stackIoMiddleware({filename: 'http', path: '/greetings', method: 'GET'});
+	.stackIoMiddleware({filename: 'http', uri: 'http://localhost:8082/greetings/:greetingId?', method: 'GET'})
+	.stackIoMiddleware({filename: 'mq', eventName: 'greeting.read'})
+	.stackIoMiddleware({filename: 'mongo', dbOpName: 'find'});
 
 module.exports.remove = Method
-	.stackIoMiddleware({filename: 'mongo', dbOpName: 'remove'})
-	.stackIoMiddleware({filename: 'http', path: '/greetings', method: 'DELETE'});
+	.stackIoMiddleware({filename: 'http', uri: 'http://localhost:8082/greetings/:greetingId', method: 'DELETE'})
+	.stackIoMiddleware({filename: 'mq', eventName: 'greeting.remove'})
+	.stackIoMiddleware({filename: 'mongo', dbOpName: 'remove'});
 
 module.exports.removeByRobotId = Method
-	.setLogicalHandler({filename: 'execOpByLookup', dbOpName: 'remove', prop: 'greeterId', foreignProp: 'robotId'})
-	.stackIoMiddleware({filename: 'mq', eventName: 'greetings.remove-by-robot-id', notifName: 'robots.remove'});
+	.stackIoMiddleware({filename: 'mq', eventName: 'greeting.remove-by-robot-id', notifName: 'robot.remove'})
+	.setLogicalHandler({filename: 'execOpByLookup', dbOpName: 'remove', prop: 'producerId', foreignProp: 'robotId'});
 
 module.exports.removeByHumanId = Method
-	.setLogicalHandler({filename: 'execOpByLookup', dbOpName: 'remove', prop: 'greeterId', foreignProp: 'humanId'})
-	.stackIoMiddleware({filename: 'mq', eventName: 'greetings.remove-by-human-id', notifName: 'humans.remove'});
+	.stackIoMiddleware({filename: 'mq', eventName: 'greeting.remove-by-human-id', notifName: 'human.remove'})
+	.setLogicalHandler({filename: 'execOpByLookup', dbOpName: 'remove', prop: 'producerId', foreignProp: 'humanId'});
